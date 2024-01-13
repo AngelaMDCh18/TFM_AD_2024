@@ -1,0 +1,1093 @@
+---
+title: "RScript_TFM_AngelaDiazChamorro_2024"
+author: "Ángela Díaz"
+date: "2024-01-12"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r eval=FALSE}
+# INSTALACIÓN DE LAS LIBRERÍAS NECESARIAS Y DE BIOCONDUCTOR 
+
+# Instalación de Bioconductor
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+# Instalación de Librerías de CRAN
+install.packages(c("readr", "ggplot2", "factoextra", "caret", "randomForest", 
+                   "gplots", "pheatmap", "xtable", "reshape2"))
+
+# Instalación de Librerías de Bioconductor
+BiocManager::install(c("edgeR", "DESeq2", "clusterProfiler", "org.Hs.eg.db", 
+                       "enrichplot", "limma"))
+```
+
+```{r}
+# ESTABLECIMIENTO DEL ENTORNO DE TRABAJO 
+
+# Definimos el directorio de trabajo
+setwd("C:/Users/Admin/Desktop")
+getwd()
+
+# Cargamos las librerías necesarias
+library(readr)
+library(edgeR)
+library(ggplot2)
+library(DESeq2)
+library(factoextra)
+library(caret)
+library(randomForest)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(limma)
+library(gplots)
+library(pheatmap)
+library(xtable)
+library(reshape2)
+
+# IMPORTAMOS LOS DATOS
+
+# Leemos los datos .CSV de la expresión génica
+datos_expresion <- read_csv("rawData_P2_ALL.csv")
+
+# Leemos los datos .CSV del número de lecturas
+datos_lecturas <- read_csv("rawData_P2_READS.csv")
+
+View(datos_expresion) # Obtenemos 20784 genes (filas) y 300 muestras (columnas)
+View(datos_lecturas)
+
+head(datos_expresion)
+head(datos_lecturas)
+```
+
+```{r}
+# FILTRADO DE DATOS UTILIZANDO CPM
+
+# Convertimos los datos en matrices
+matriz_expresion <- as.matrix(datos_expresion[,-1])  # Excluímos la 1ª columna 
+matriz_lecturas <- as.matrix(datos_lecturas$Reads)
+
+# Calculamos los CPM
+# CPM = (número lecturas gen / número total lecturas muestra) * 1.000.000
+cpm_data <- cpm(DGEList(counts=matriz_expresion, lib.size=matriz_lecturas))
+
+# Aplicamos el filtro
+# "Un gen se mantiene si su valor de CPM > 1 en al menos 15 muestras"
+genes_filtrados <- rowSums(cpm_data > 1) >= 15
+datos_filtrados <- datos_expresion[genes_filtrados, ]
+
+# Vemos los datos filtrados
+View(datos_filtrados) # Pasamos a tener 17364 genes
+
+datos_filtrados <- datos_filtrados[,-1]
+
+head(datos_filtrados)
+```
+
+```{r}
+# CONTROL DE CALIDAD
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Histogramas y Boxplots conteos crudos.pdf", width=7, height=5) 
+
+# HISTOGRAMAS DE CONTEOS CRUDOS
+
+# Transponemos la matriz de expresión para facilitar la creación de histogramas
+rownames(matriz_expresion) <- datos_expresion$Gene 
+matriz_expresion_t <- t(matriz_expresion)
+
+# Generamos un histograma para cada una de las primeras 10 muestras 
+par(mfrow=c(2, 5))  # Ajustamos para mostrar 2 filas y 5 columnas
+for(i in 1:min(10, ncol(matriz_expresion_t))) {
+  hist(matriz_expresion_t[,i], main=paste("Muestra", 
+                                          rownames(matriz_expresion_t)[i]), 
+       xlab="Conteos crudos", ylab="Frecuencia", breaks=50)
+} 
+
+# BOXPLOTS DE CONTEOS CRUDOS
+
+# Convertimos la matriz de expresión a un formato adecuado para ggplot
+datos_long <- as.data.frame(matriz_expresion[,1:min(10, 
+                                                    ncol(matriz_expresion))])
+datos_long$Gene <- rownames(datos_long)
+datos_long <- reshape2::melt(datos_long, id.vars = "Gene")
+
+# Creamos boxplots para las primeras 10 muestras 
+ggplot(datos_long, aes(x=variable, y=value)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x="Muestra", y="Conteos crudos", 
+       title="Boxplots de conteos por muestra sin normalizar")
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# NORMALIZACIÓN USANDO DESeq2
+
+# Preparamos los datos para DESeq2
+dds <- DESeqDataSetFromMatrix(countData = matriz_expresion,
+                              colData = datos_lecturas,
+                              design = ~ 1)
+
+# Ejecutamos DESeq para realizar la normalización
+dds <- DESeq(dds)
+
+# Aplicamos la transformación de estabilización de la varianza (VST)
+vst_data <- vst(dds, blind=TRUE)
+
+# Accedemos a los datos normalizados
+normalized_counts <- assay(vst_data)
+
+# Nos aseguramos de que los nombres de los genes se conserven 
+matriz_expresion_2 <- as.matrix(datos_expresion)
+rownames(matriz_expresion_2) <- datos_expresion$Gene 
+rownames(normalized_counts) <- rownames(matriz_expresion_2)
+
+# Visualizamos los datos normalizados
+View(normalized_counts)
+```
+
+```{r}
+# HEATMAP SIN NORMALIZAR
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("HeatMap DESeq2 sin Normalizar.pdf", width=7, height=5)
+
+# Determinamos la semilla para reproducibilidad
+set.seed(45175823)
+
+# Determinamos los 2.000 genes que se mostrarán en el heatmap 
+indices_aleatorios <- sample(nrow(datos_expresion), 2000)
+
+# Preparamos los datos para el heatmap con datos sin normalizar
+heatmap_SN_reducido <- as.matrix(datos_expresion[indices_aleatorios, -1])
+
+# Creamos el heatmap
+pheatmap(heatmap_SN_reducido, 
+         scale = "row", 
+         clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean",
+         clustering_method = "complete",
+         color = colorRampPalette(c("blue", "white", "red"))(50), # Colores 
+         show_rownames = FALSE, # No mostrar los nombres de genes
+         show_colnames = FALSE) # No mostrar los nombres de muestras
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# HEATMAP NORMALIZADO CON DESeq2
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Heatmap DESeq2 Normalizado.pdf", width=7, height=5)
+
+# Determinamos la semilla para reproducibilidad
+set.seed(45175823)
+
+# Preparamos los datos para el heatmap con datos normalizados
+heatmap_N_reducido <- normalized_counts[indices_aleatorios, ]
+
+# Creamos el heatmap
+pheatmap(heatmap_N_reducido, 
+         scale = "row", 
+         clustering_distance_rows = "euclidean", 
+         clustering_distance_cols = "euclidean", 
+         clustering_method = "complete",
+         color = colorRampPalette(c("blue", "white", "red"))(50), # Colores 
+         show_rownames = FALSE, # No mostrar los nombres de genes
+         show_colnames = FALSE) # No mostrar los nombres de muestras
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# FILTRADO POR VARIABILIDAD
+
+# Calculamos la desviación estándar para cada gen
+desviaciones <- apply(normalized_counts, 1, sd)
+
+# Seleccionamos un umbral de variabilidad
+umbral <- quantile(desviaciones, 0.75)  
+
+# Filtramos los genes que tienen una variabilidad superior al umbral
+genes_variabilidad_alta <- desviaciones > umbral
+datos_filtrados_variabilidad <- normalized_counts[genes_variabilidad_alta, ]
+
+# Visualizamos los datos filtrados
+View(datos_filtrados_variabilidad) # Pasamos a tener 5.196 genes
+datos_filtrados_variabilidad_NULL <- datos_filtrados_variabilidad
+rownames(datos_filtrados_variabilidad_NULL) <- NULL #Excluímos nombres de genes 
+
+# FILTRADO POR NIVEL DE EXPRESIÓN MÍNIMO
+
+# Establecemos un umbral mínimo de expresión
+umbral_expresion <- 10  
+
+# Calculamos el número de muestras en las que cada gen supera el umbral
+n_muestras_sobre_umbral <- rowSums(normalized_counts > umbral_expresion)
+
+# Seleccionamos un criterio para el filtrado
+# "Genes expresados en al menos la mitad de las muestras"
+criterio <- ncol(normalized_counts) / 2
+genes_expresados <- n_muestras_sobre_umbral > criterio
+
+# Filtramos los genes
+datos_filtrados_expresion <- normalized_counts[genes_expresados, ]
+
+# Visualizamos los datos filtrados
+View(datos_filtrados_expresion) # Pasamos a tener 630 genes
+``` 
+
+```{r}
+# CONTROL DE CALIDAD TRAS EL FILTRADO Y NORMALIZACIÓN
+
+# Abrimos una conexión con un archivo PDF para empezar a guardar los gráficos
+pdf("Histogramas y Boxplots tras Normalización.pdf", width=7, height=5) 
+
+# HISTOGRAMAS DE CONTEOS CRUDOS
+
+# Asignamos nombres de muestras a las columnas de datos_filtrados_variabilidad
+colnames(datos_filtrados_variabilidad) <- datos_lecturas$Sample
+
+# Transponemos la matriz de expresión para facilitar la creación de histogramas
+matriz_expresion_t_variabilidad <- t(datos_filtrados_variabilidad)
+
+# Generamos un histograma para cada una de las primeras 10 muestras
+par(mfrow=c(2, 5))  # Ajustamos para mostrar 2 filas y 5 columnas
+for(i in 1:min(10, ncol(matriz_expresion_t_variabilidad))) {
+  hist(matriz_expresion_t_variabilidad[,i], 
+       main=paste("Muestra", rownames(matriz_expresion_t_variabilidad)[i]), 
+       xlab="Conteos crudos", ylab="Frecuencia", breaks=50)
+} 
+
+# BOXPLOTS DE CONTEOS CRUDOS
+
+# Convertimos la matriz de expresión a un formato adecuado para ggplot
+datos_long <- as.data.frame(datos_filtrados_variabilidad
+                            [,1:min(10, ncol(datos_filtrados_variabilidad))])
+datos_long$Gene <- rownames(datos_long)
+datos_long <- reshape2::melt(datos_long, id.vars = "Gene")
+
+# Creamos boxplots para las primeras 10 muestras
+ggplot(datos_long, aes(x=variable, y=value)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x="Muestra", y="Conteos crudos", 
+       title="Boxplots de conteos por muestra normalizados")
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# ESTUDIO CON LA NORMALIZACIÓN POR VARIABILIDAD
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("PCA, clustering y plots de agrupacion.pdf", width=7, height=5) 
+
+# Determinamos la semilla para reproducibilidad
+set.seed(45175823)
+
+# ANÁLISIS DE COMPONENTES PRINCIPALES
+
+# Generamos el PCA excluyendo la columna de nombres de genes
+pca_resultados <- prcomp(t(datos_filtrados_variabilidad_NULL), scale. = TRUE)
+
+# Visualizamos los resultados del PCA sin nombres de muestras
+fviz_pca_ind(pca_resultados, label = "none") # Sin etiquetas de muestras
+
+# Generamos Biplot para visualizar observaciones y variables en el espacio PCA
+biplot(pca_resultados, scale = 0)
+
+# CLUSTERING K-MEANS 
+
+# Determinamos el número de clusters (k) por el método de "codo"
+fviz_nbclust(t(datos_filtrados_variabilidad), kmeans, method = "wss")
+
+# Aplicamos k-means con el número de clusters elegido (3)
+k <- 3
+
+# Realizamos k-means con el número óptimo de clusters
+kmeans_resultados <- kmeans(t(datos_filtrados_variabilidad), centers = k)
+
+# Creamos el gráfico de los clusters de k-means sin nombres de muestras
+fviz_cluster(kmeans_resultados, data = t(datos_filtrados_variabilidad_NULL), 
+             label = FALSE, geom = "point")
+
+# CLUSTERING JERÁRQUICO
+
+# Calculamos las distancias
+distancias <- dist(t(datos_filtrados_variabilidad))
+
+# Generamos el clustering jerárquico
+clustering_J <- hclust(distancias, method = "complete")
+
+# Visualizamos el dendrograma del clustering jerárquico sin nombres de muestras
+plot(clustering_J, main = "Dendrograma de Clustering Jerárquico", 
+     xlab = "Muestras", sub = "", labels = FALSE)
+
+# Dividimos el dendrograma para obtener grupos
+grupos <- cutree(clustering_J, k = 3)  # Ajustamos el número de grupos 
+
+# Visualizamos los grupos en el dendrograma
+rect.hclust(clustering_J, k = 3, border = 2:4)
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# QUÉ MUESTRA ES DE QUÉ GRUPO 
+
+# Los nombres de las muestras son las columnas de 'datos_filtrados_variabilidad' 
+nombres_muestras <- colnames(datos_filtrados_variabilidad)
+
+# Añadimos las etiquetas de grupo a los datos 
+grupos_kmeans <- kmeans_resultados$cluster
+
+# Creamos un dataframe que asocie cada muestra con su grupo
+muestras_por_grupo <- data.frame(
+  Muestra = nombres_muestras,
+  Grupo = grupos_kmeans
+)
+
+# Vemos las muestras en cada grupo
+muestras_grupo_1 <- muestras_por_grupo[muestras_por_grupo$Grupo == 1, ]
+muestras_grupo_2 <- muestras_por_grupo[muestras_por_grupo$Grupo == 2, ]
+muestras_grupo_3 <- muestras_por_grupo[muestras_por_grupo$Grupo == 3, ]
+
+# Visualizamos el encabezado de cada grupo
+head(muestras_grupo_1)
+head(muestras_grupo_2)
+head(muestras_grupo_3)
+```
+
+```{r}
+# GENES DIFERENCIALMENTE EXPRESADOS DESeq2
+
+# Determinamos la semilla para reproducibilidad
+set.seed(45175823)
+
+# Extraemos los nombres de los genes del objeto datos_expresion
+nombres_genes <- datos_expresion$Gene
+
+# Matriz de expresión original con conteos enteros (DESeq2 no admite decimales)
+matriz_expresion_crudos <- as.matrix(datos_expresion[,-1])  
+
+# kmeans_resultados es el resultado de nuestro análisis k-means
+datos_lecturas$grupos_kmeans <- factor(kmeans_resultados$cluster)
+
+# Verificamos que grupos_kmeans es un factor
+str(datos_lecturas$grupos_kmeans)
+
+# Preparamos los datos para DESeq2 nuevamente
+dds <- DESeqDataSetFromMatrix(countData = matriz_expresion_crudos,
+                              colData = datos_lecturas,
+                              design = ~ grupos_kmeans)
+
+# Asignamos los nombres de los genes a las filas de dds
+rownames(dds) <- nombres_genes
+
+# Procedemos con DESeq
+dds <- DESeq(dds)
+
+# Realizamos la comparación entre grupos del k-means
+resultados_DESeq2_1_2 <- results(dds, contrast = c("grupos_kmeans", "1", "2"))
+resultados_DESeq2_1_3 <- results(dds, contrast = c("grupos_kmeans", "1", "3"))
+resultados_DESeq2_2_3 <- results(dds, contrast = c("grupos_kmeans", "2", "3"))
+
+# Ordenamos los resultados
+resultados_ordenados_1 <- resultados_DESeq2_1_2[order
+                                                (resultados_DESeq2_1_2$padj), ]
+resultados_ordenados_2 <- resultados_DESeq2_1_3[order
+                                                (resultados_DESeq2_1_3$padj), ]
+resultados_ordenados_3 <- resultados_DESeq2_2_3[order
+                                                (resultados_DESeq2_2_3$padj), ]
+
+# Visualizamos los resultados
+head(resultados_ordenados_1)
+head(resultados_ordenados_2)
+head(resultados_ordenados_3)
+
+# Filtramos por un valor p ajustado más estricto
+resultados_filtrados_1 <- subset(resultados_ordenados_1, padj < 1e-80)
+resultados_filtrados_2 <- subset(resultados_ordenados_2, padj < 1e-40)
+resultados_filtrados_3 <- subset(resultados_ordenados_3, padj < 1e-55)
+
+# Vemos los resultados filtrados (solo los nombres de los genes)
+print(rownames(resultados_filtrados_1))
+print(rownames(resultados_filtrados_2))
+print(rownames(resultados_filtrados_3))
+```
+
+```{r}
+# GENES DIFERENCIALMENTE EXPRESADOS EDGER
+
+# Determinamos la semilla para reproducibilidad
+set.seed(45175823)
+
+# Utilizaremos 'datos_filtrados_variabilidad' para el análisis
+colnames(datos_filtrados_variabilidad) <- datos_lecturas$Sample
+
+# Creamos un objeto DGEList para edgeR
+dge <- DGEList(counts = datos_filtrados_variabilidad)
+
+# kmeans_resultados es el resultado de nuestro análisis k-means
+grupos <- factor(kmeans_resultados$cluster)
+
+# Añadimos la información de grupo al objeto DGEList
+dge$samples$group <- grupos
+
+# Calculamos los factores de normalización
+dge <- calcNormFactors(dge)
+
+# Estimamos las dispersiones
+dge <- estimateDisp(dge, design = model.matrix(~ group, data = dge$samples))
+
+# Definimos el modelo y realizamos el análisis de DEGs
+design <- model.matrix(~ group, data = dge$samples)
+fit <- glmFit(dge, design)
+
+# Realizamos pruebas de contraste para comparar los grupos
+
+# Grupo 1 VS Grupo 2
+contrastes_1_2 <- makeContrasts(1-2, levels = design)
+fit1 <- glmLRT(fit, contrast = contrastes_1_2)
+
+# Grupo 1 VS Grupo 3
+contrastes_1_3 <- makeContrasts(1-3, levels = design)
+fit2 <- glmLRT(fit, contrast = contrastes_1_3)
+
+# Grupo 2 VS Grupo 3
+contrastes_2_3 <- makeContrasts(2-3, levels = design)
+fit3 <- glmLRT(fit, contrast = contrastes_2_3)
+
+# Obtenemos los resultados
+degs_results_1 <- topTags(fit1)
+degs_results_2 <- topTags(fit2)
+degs_results_3 <- topTags(fit3)
+
+# Visualizamos los resultados
+print(degs_results_1)
+print(degs_results_2)
+print(degs_results_3)
+```
+
+```{r}
+# VISUALIZACIÓN VOLCANO PLOTS DESeq2
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("VolcanoPlots DESeq2 y edgeR.pdf", width=7, height=5) 
+
+# Generamos una función para crear un Volcano Plot para DESeq2
+crear_volcano_DESeq2 <- function(resultados) {
+  # Transformamos los resultados a data frame
+  resultados_df <- as.data.frame(resultados)
+  
+  # Creamos el Volcano Plot usando ggplot2
+  ggplot(resultados_df, aes(x=log2FoldChange, y=-log10(padj))) +
+    geom_point(alpha=0.4) +
+    theme_minimal() +
+    labs(title="Volcano Plot DESeq2", 
+         x="Log2 Fold Change", 
+         y="-Log10 p-ajustado") +
+    geom_hline(yintercept=-log10(0.05), col="blue", linetype="dashed") 
+}
+
+# Creamos y visualizamos los Volcano Plots para cada comparación
+volcano_DESeq2_1_2 <- crear_volcano_DESeq2(resultados_DESeq2_1_2)
+volcano_DESeq2_1_3 <- crear_volcano_DESeq2(resultados_DESeq2_1_3)
+volcano_DESeq2_2_3 <- crear_volcano_DESeq2(resultados_DESeq2_2_3)
+
+# Mostramos los plots
+print(volcano_DESeq2_1_2)
+print(volcano_DESeq2_1_3)
+print(volcano_DESeq2_2_3)
+
+# VISUALIZACIÓN VOLCANO PLOTS edgeR
+
+# Generamos una función para crear un Volcano Plot para resultados edgeR
+crear_volcano_edgeR <- function(degs_results) {
+  # Extraemos los resultados y los convertimos a data frame
+  resultados_df <- as.data.frame(degs_results$table)
+  
+  # Creamos el Volcano Plot usando ggplot2
+  ggplot(resultados_df, aes(x=logFC, y=-log10(PValue))) +
+    geom_point(alpha=0.4) +
+    theme_minimal() +
+    labs(title="Volcano Plot edgeR", 
+         x="Log Fold Change", 
+         y="-Log10 P-Value") +
+    geom_hline(yintercept=-log10(0.05), 
+               col="blue", linetype="dashed") 
+}
+
+# Creamos y visualizamos los Volcano Plots para cada comparación
+volcano_edgeR_1_2 <- crear_volcano_edgeR(degs_results_1)
+volcano_edgeR_1_3 <- crear_volcano_edgeR(degs_results_2)
+volcano_edgeR_2_3 <- crear_volcano_edgeR(degs_results_3)
+
+# Mostramos los plots
+print(volcano_edgeR_1_2)
+print(volcano_edgeR_1_3)
+print(volcano_edgeR_2_3)
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# HEATMAPs DESEQ2 DEGs
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Heatmaps DESeq2 por grupos.pdf", width=7, height=5) 
+
+# Aplicamos la transformación de los datos para el heatmap
+dds_vst <- vst(dds, blind=FALSE)
+
+# Extraemos los DEGs para el heatmap 1VS2
+de_genes_heatmap_1 <- rownames(subset(resultados_ordenados_1, padj < 1e-80))
+# Subset de datos normalizados para DEGs
+matriz_expresion_vst_1 <- assay(dds_vst)[de_genes_heatmap_1, ]
+# Heatmap
+pheatmap(matriz_expresion_vst_1,
+         scale="row",
+         cluster_rows=TRUE,
+         cluster_cols=TRUE,
+         show_rownames=FALSE, 
+         show_colnames=FALSE)  
+
+# Extraemos los DEGs para el heatmap 1VS3
+de_genes_heatmap_2 <- rownames(subset(resultados_ordenados_2, padj < 1e-40))
+# Subset de datos normalizados para DEGs
+matriz_expresion_vst_2 <- assay(dds_vst)[de_genes_heatmap_2, ]
+# Heatmap
+pheatmap(matriz_expresion_vst_2,
+         scale="row",
+         cluster_rows=TRUE,
+         cluster_cols=TRUE,
+         show_rownames=FALSE,  
+         show_colnames=FALSE) 
+
+# Extraemos los DEGs para el heatmap 2VS3
+de_genes_heatmap_3 <- rownames(subset(resultados_ordenados_3, padj < 1e-55))
+# Subset de datos normalizados para DEGs
+matriz_expresion_vst_3 <- assay(dds_vst)[de_genes_heatmap_3, ]
+# Heatmap
+pheatmap(matriz_expresion_vst_3,
+         scale="row",
+         cluster_rows=TRUE,
+         cluster_cols=TRUE,
+         show_rownames=FALSE,  
+         show_colnames=FALSE)  
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# GRÁFICO DE BARRAS DESeq2 VS edgeR
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Gráfico de barras DESeq2 vs edgeR por grupos", width=7, height=5)
+
+# Calculamos el número de DEGs para DESeq2
+num_DEGs_DESeq2_1_2 <- sum(resultados_DESeq2_1_2$padj < 1e-80, na.rm = TRUE)
+num_DEGs_DESeq2_1_3 <- sum(resultados_DESeq2_1_3$padj < 1e-40, na.rm = TRUE)
+num_DEGs_DESeq2_2_3 <- sum(resultados_DESeq2_2_3$padj < 1e-55, na.rm = TRUE)
+
+# Calculamos el número de DEGs para edgeR 
+num_DEGs_edgeR_1_2 <- sum(degs_results_1$table$PValue < 0.05, na.rm = TRUE)
+num_DEGs_edgeR_1_3 <- sum(degs_results_2$table$PValue < 0.05, na.rm = TRUE)
+num_DEGs_edgeR_2_3 <- sum(degs_results_3$table$PValue < 0.05, na.rm = TRUE)
+
+# Creamos un data frame con esta información
+df_DEGs <- data.frame(
+  Comparacion = c("1vs2", "1vs3", "2vs3"),
+  DEGs_DESeq2 = c(num_DEGs_DESeq2_1_2, num_DEGs_DESeq2_1_3, 
+                  num_DEGs_DESeq2_2_3),
+  DEGs_edgeR = c(num_DEGs_edgeR_1_2, num_DEGs_edgeR_1_3, num_DEGs_edgeR_2_3)
+)
+
+# Aplicamos melt() para tener un formato largo adecuado para ggplot2
+df_melted <- melt(df_DEGs, id.vars = "Comparacion", variable.name = "Metodo", 
+                  value.name = "Numero_DEGs")
+
+# Ahora creamos el gráfico de barras
+ggplot(df_melted, aes(x = Comparacion, y = Numero_DEGs, fill = Metodo)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  theme_minimal() +
+  labs(title = "Número de DEGs por Comparación y Método",
+       x = "Comparación",
+       y = "Número de DEGs",
+       fill = "Método de Análisis") +
+  scale_fill_manual(values = c("DEGs_DESeq2" = "blue", "DEGs_edgeR" = "red"))
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# ALGORITMO DE CLASIFICACIÓN RANDOMFOREST
+
+# Determinamos la semilla para reproducibilidad
+set.seed(45175823)
+
+# Transponemos los datos para que las muestras sean las filas
+datos_transpuestos <- t(datos_filtrados_variabilidad)
+
+# Convertimos en data frame y añadimos la clasificación de grupo
+datos_transpuestos_df <- as.data.frame(datos_transpuestos)
+datos_transpuestos_df$grupos_kmeans <- grupos_kmeans
+
+# Dividimos los datos en conjuntos de entrenamiento y prueba
+indices <- createDataPartition(datos_transpuestos_df$grupos_kmeans, p = 0.8, 
+                               list = FALSE)
+datos_entrenamiento <- datos_transpuestos_df[indices,]
+datos_prueba <- datos_transpuestos_df[-indices,]
+
+# Convertimos 'grupos_kmeans' a factor
+datos_entrenamiento$grupos_kmeans <- as.factor(datos_entrenamiento$grupos_kmeans)
+datos_prueba$grupos_kmeans <- as.factor(datos_prueba$grupos_kmeans)
+
+# Nos aseguramos de que los nombres de las columnas sean nombres válidos en R
+nombres <- make.names(names(datos_entrenamiento))
+names(datos_entrenamiento) <- nombres
+names(datos_prueba) <- nombres
+
+# Entrenamos el modelo Random Forest
+modelo_rf <- randomForest(grupos_kmeans ~ ., 
+                          data = datos_entrenamiento, ntree = 500)
+
+# Evaluamos el modelo
+predicciones <- predict(modelo_rf, datos_prueba)
+matriz_confusion <- confusionMatrix(predicciones, datos_prueba$grupos_kmeans)
+
+# Mostramos los resultados de la evaluación
+print(matriz_confusion)
+
+# Mostramos la importancia de las Variables (los Genes)
+importancia <- importance(modelo_rf)
+importancia_ordenada <- importancia[order(importancia, decreasing = TRUE),]
+head(importancia_ordenada)
+```
+
+```{r}
+# ANÁLISIS DE ENRIQUECIMIENTO 1 VS 2 GO
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Enriquecimiento GO 1vs2", width=7, height=5)
+
+# Determinamos la semilla para reproducibilidad
+set.seed(45175823)
+
+# Prepararamos los genes de interés
+genes_DESeq2_1 <- rownames(resultados_filtrados_1) # DEGs Grupo 1 VS Grupo 2
+
+# Realizamos el análisis de enriquecimiento de GO
+ego_1 <- enrichGO(gene         = genes_DESeq2_1,
+                OrgDb        = org.Hs.eg.db,
+                keyType      = "SYMBOL",
+                ont          = "ALL",  
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                qvalueCutoff = 0.2)
+
+# Vemos los resultados del enriquecimiento de GO
+print(ego_1)
+head(ego_1)
+
+# Visualizamos con un diagrama de barras
+barplot(ego_1, showCategory=10)  # Mostramos los 20 términos más significativos
+
+# Visualizamos con un gráfico de puntos
+dotplot(ego_1, showCategory=10) # Mostramos los 20 términos más significativos
+
+# Creamos un vector con log2 fold changes como valores
+geneList_1 <- resultados_DESeq2_1_2$log2FoldChange
+
+# Los nombres de los genes serán los nombres de las filas
+names(geneList_1) <- rownames(resultados_DESeq2_1_2)
+
+# Filtramos para mantener sólo los genes con valores p significativos
+geneList_1 <- geneList_1[!is.na(resultados_DESeq2_1_2$pvalue) & 
+                         resultados_DESeq2_1_2$pvalue < 0.05]
+
+# Visualizamos con gráfico de red
+cnetplot(ego_1, foldChange=geneList_1)
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# ANÁLISIS DE ENRIQUECIMIENTO 1 VS 3 GO
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Enriquecimiento GO 1vs3", width=7, height=5)
+
+# Determinamos la semilla para reproducibilidad
+set.seed(45175823)
+
+# Prepararamos los genes de interés
+genes_DESeq2_2 <- rownames(resultados_filtrados_2) # DEGs Grupo 1 VS Grupo 3
+
+# Realizamos el análisis de enriquecimiento de GO
+ego_2 <- enrichGO(gene         = genes_DESeq2_2,
+                OrgDb        = org.Hs.eg.db,
+                keyType      = "SYMBOL",
+                ont          = "ALL", 
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                qvalueCutoff = 0.2)
+
+# Vemos los resultados del enriquecimiento de GO
+print(ego_2)
+head(ego_2)
+
+# Visualizamos con un diagrama de barras
+barplot(ego_2, showCategory=10)  # Mostramos los 20 términos más significativos
+
+# Visualizamos con un gráfico de puntos
+dotplot(ego_2, showCategory=10) # Mostramos los 20 términos más significativos
+
+# Creamos un vector con log2 fold changes como valores
+geneList_2 <- resultados_DESeq2_1_3$log2FoldChange
+
+# Los nombres de los genes serán los nombres de las filas
+names(geneList_2) <- rownames(resultados_DESeq2_1_3)
+
+# Filtramos para mantener sólo los genes con valores p significativos
+geneList_2 <- geneList_2[!is.na(resultados_DESeq2_1_3$pvalue) &
+                         resultados_DESeq2_1_3$pvalue < 0.05]
+
+# Visualizamos con un gráfico de red
+cnetplot(ego_2, foldChange=geneList_2)
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# ANÁLISIS DE ENRIQUECIMIENTO 2 VS 3 GO
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Enriquecimiento GO 2vs3", width=7, height=5)
+
+# Determinamos la semilla para reproducibilidad
+set.seed(45175823)
+
+# Prepararamos los genes de interés
+genes_DESeq2_3 <- rownames(resultados_filtrados_3) # DEGs Grupo 1 VS Grupo 2
+
+# Realizamos el análisis de enriquecimiento de GO
+ego_3 <- enrichGO(gene         = genes_DESeq2_3,
+                OrgDb        = org.Hs.eg.db,
+                keyType      = "SYMBOL",
+                ont          = "ALL", 
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                qvalueCutoff = 0.2)
+
+# Vemos los resultados del enriquecimiento de GO
+print(ego_3)
+head(ego_3)
+
+# Visualizamos con un diagrama de barras
+barplot(ego_3, showCategory=10)  
+
+# Visualizamos con un gráfico de puntos
+dotplot(ego_3, showCategory=10)
+
+# Creamos un vector con log2 fold changes como valores
+geneList_3 <- resultados_DESeq2_2_3$log2FoldChange
+
+# Los nombres de los genes serán los nombres de las filas
+names(geneList_3) <- rownames(resultados_DESeq2_2_3)
+
+# Filtramos para mantener sólo los genes con valores p significativos
+geneList_3 <- geneList_3[!is.na(resultados_DESeq2_2_3$pvalue) &
+                         resultados_DESeq2_2_3$pvalue < 0.05]
+
+# Visualizamos con un diagrama de red
+cnetplot(ego_3, foldChange=geneList_3)
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# ANÁLISIS DE ENRIQUECIMIENTO KEGG 1 VS 2
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Enriquecimiento KEGG 1vs2", width=7, height=5)
+
+# Convertimos símbolos de genes a identificadores Entrez
+genes_entrez_1 <- mapIds(org.Hs.eg.db, 
+                       keys = genes_DESeq2_1, 
+                       column = "ENTREZID", 
+                       keytype = "SYMBOL", 
+                       multiVals = "first")
+
+# Eliminamos los posibles NA
+genes_entrez_1 <- na.omit(genes_entrez_1)
+
+# Realizamos el análisis de enriquecimiento de KEGG con identificadores Entrez
+ek_1 <- enrichKEGG(gene = genes_entrez_1,
+                 organism = "hsa",
+                 keyType = "kegg",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.2)
+
+# Vermos los resultados
+print(ek_1)
+head(ek_1)
+
+# Visualizamos con un diagrama de barras
+barplot(ek_1, showCategory=10)  # Mostramos los 20 términos más significativos
+
+# Visualizamos con un gráfico de puntos
+dotplot(ek_1, showCategory=10)
+
+# Creamos un vector con log2 fold changes como valores
+# Los nombres de los genes serán los nombres de las filas
+geneList_1 <- resultados_DESeq2_1_2$log2FoldChange
+names(geneList_1) <- rownames(resultados_DESeq2_1_2)
+
+# Filtramos para mantener solo los genes con valores p significativos
+geneList_1 <- geneList_1[!is.na(resultados_DESeq2_1_2$pvalue) &
+                         resultados_DESeq2_1_2$pvalue < 0.05]
+
+# Visualizamos con un gráfico de Red
+cnetplot(ek_1, foldChange=geneList_1)
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# ANÁLISIS DE ENRIQUECIMIENTO KEGG 1 VS 3
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Enriquecimiento KEGG 1vs3", width=7, height=5)
+
+# Convertimos símbolos de genes a identificadores Entrez
+genes_entrez_2 <- mapIds(org.Hs.eg.db, 
+                       keys = genes_DESeq2_2, 
+                       column = "ENTREZID", 
+                       keytype = "SYMBOL", 
+                       multiVals = "first")
+
+# Eliminamos los posibles NA
+genes_entrez_2 <- na.omit(genes_entrez_2)
+
+# Realizamos el análisis de enriquecimiento de KEGG con identificadores Entrez
+ek_2 <- enrichKEGG(gene = genes_entrez_2,
+                 organism = "hsa",
+                 keyType = "kegg",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.2)
+
+# Vermos los resultados
+print(ek_2)
+head(ek_2)
+
+# Visualizamos con un diagrama de barras
+barplot(ek_2, showCategory=10)  # Mostramos los 20 términos más significativos
+
+# Visualizamos con un gráfico de puntos
+dotplot(ek_2, showCategory=10)
+
+# Creamos un vector con log2 fold changes como valores
+# Los nombres de los genes serán los nombres de las filas
+geneList_2 <- resultados_DESeq2_1_3$log2FoldChange
+names(geneList_2) <- rownames(resultados_DESeq2_1_3)
+
+# Filtramos para mantener solo los genes con valores p significativos
+geneList_2 <- geneList_2[!is.na(resultados_DESeq2_1_3$pvalue) &
+                         resultados_DESeq2_1_3$pvalue < 0.05]
+
+# Visualizamos con un gráfico de Red
+cnetplot(ek_2, foldChange=geneList_2)
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# ANÁLISIS DE ENRIQUECIMIENTO KEGG 2 VS 3
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Enriquecimiento KEGG 2vs3", width=7, height=5)
+
+
+# Convertimos símbolos de genes a identificadores Entrez
+genes_entrez_3 <- mapIds(org.Hs.eg.db, 
+                       keys = genes_DESeq2_3, 
+                       column = "ENTREZID", 
+                       keytype = "SYMBOL", 
+                       multiVals = "first")
+
+# Eliminamos los posibles NA
+genes_entrez_3 <- na.omit(genes_entrez_3)
+
+# Realizamos el análisis de enriquecimiento de KEGG con identificadores Entrez
+ek_3 <- enrichKEGG(gene = genes_entrez_3,
+                 organism = "hsa",
+                 keyType = "kegg",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.2)
+
+# Vermos los resultados
+print(ek_3)
+head(ek_3)
+
+# En este caso 2 VS 3 no visualizamos ningún gráfico (head(ed_3) = 0)
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# ANÁLISIS EXPRESIÓN DIFERENCIAL CON LIMMA
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Transformación voom() con limma.pdf", width=7, height=5) 
+
+# kmeans_resultados$cluster tiene la clasificación de cada muestra
+grupos_X <- factor(kmeans_resultados$cluster)
+
+# Creamos la matriz de diseño
+diseño_X <- model.matrix(~ 0 + grupos_X)
+colnames(diseño_X) <- c("Grupo1", "Grupo2", "Grupo3")
+
+# Aplicamos la transformación voom()
+v <- voom(counts=datos_filtrados_variabilidad, design=diseño_X, plot=TRUE)
+
+# Ajustamos el modelo lineal y la estimación bayesiana
+fit <- lmFit(v, diseño_X)
+fit <- eBayes(fit)
+plotSA(fit)
+
+# Identificamos los DEGs y comparamos entre grupos
+comparaciones <- makeContrasts(
+  Grupo1vsGrupo2 = Grupo1 - Grupo2,
+  Grupo1vsGrupo3 = Grupo1 - Grupo3,
+  Grupo2vsGrupo3 = Grupo2 - Grupo3,
+  levels = diseño_X
+)
+fit2 <- contrasts.fit(fit, comparaciones)
+fit2 <- eBayes(fit2)
+
+# Almacenamos los resultados
+genes_de_G1_G2 <- topTable(fit2, coef="Grupo1vsGrupo2")
+genes_de_G1_G3 <- topTable(fit2, coef="Grupo1vsGrupo3")
+genes_de_G2_G3 <- topTable(fit2, coef="Grupo2vsGrupo3")
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# VISUALIZACIÓN GRÁFICOS DEGs LIMMA
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Volcanoplots, heatmap y boxplot con limma.pdf", width=7, height=5) 
+
+# VOLCANO PLOTS
+
+# Generamos la función para las representaciones
+volcanoPlot <- function(fit, coef) {
+  topTable_filtrada <- topTable(fit, coef=coef, number=Inf)
+  with(topTable_filtrada, plot(logFC, -log10(P.Value), pch=20, main=paste("Volcano Plot", coef), xlab="Log Fold Change", ylab="-Log10 P-value"))
+  abline(h = -log10(0.05), col="blue")
+}
+# Visualizamos
+volcanoPlot(fit2, "Grupo1vsGrupo2")
+volcanoPlot(fit2, "Grupo1vsGrupo3")
+volcanoPlot(fit2, "Grupo2vsGrupo3")
+
+# HEATMAP
+
+# Creamos un subset de los datos de expresión para los DEGs
+de_genes <- c(rownames(genes_de_G1_G2), rownames(genes_de_G1_G3), rownames(genes_de_G2_G3))
+de_data_subset <- datos_filtrados_variabilidad[de_genes,]
+
+# Visualizamos
+heatmap.2(as.matrix(de_data_subset), 
+          scale="row", 
+          ColSideColors=rainbow(3)[grupos_X], 
+          trace="none", 
+          margin=c(10, 6),
+          labRow=NULL,  
+          labCol=NULL)  
+
+pheatmap(de_data_subset,
+         scale="row",
+         cluster_rows=TRUE,
+         cluster_cols=TRUE,
+         show_rownames=FALSE, 
+         show_colnames=FALSE) 
+
+# BOXPLOT
+
+# Generamos la función para las representaciones
+boxplot_gene <- function(gene, data, group) {
+  gene_data <- data[gene,]
+  boxplot(gene_data ~ group, main=paste("Expresión de", gene), 
+          ylab="Expresión (log-cpm)", xlab="Grupo")
+}
+
+# Cambiamos el nombre del gen entre " " por el que queremos buscar
+boxplot_gene("CXCL14", datos_filtrados_variabilidad, grupos_X) 
+
+# GRÁFICOS MD
+
+# Generamos la función para las representaciones
+mdPlot <- function(fit, coef) {
+  plotMD(fit, column=coef, main=paste("MD Plot", coef), xlab="Average Expression", ylab="Log Fold Change")
+}
+
+# Visualizamos
+mdPlot(fit2, "Grupo1vsGrupo2")
+mdPlot(fit2, "Grupo1vsGrupo3")
+mdPlot(fit2, "Grupo2vsGrupo3")
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
+
+```{r}
+# BOXPLOT CLCX14 CON DESeq2
+
+# Abrimos una conexión con un archivo PDF para guardar los gráficos
+pdf("Boxplot para CLCX14 DESeq2.pdf", width=7, height=5) 
+
+# Generamos una función para el boxplot de un gen específico
+boxplot_gene_DESeq2 <- function(gene, ddsObj, groupInfo) {
+  # Extraemos los datos normalizados
+  vst <- vst(ddsObj, blind=FALSE)
+  gene_data <- assay(vst)[gene, ]
+
+  # Creamos el boxplot
+  boxplot(gene_data ~ groupInfo, 
+          main = paste("Expresión de", gene), 
+          ylab = "Expresión (log-scale)", 
+          xlab = "Grupo")
+}
+
+# Boxplot para el gen "CXCL14"
+boxplot_gene_DESeq2("CXCL14", dds, datos_lecturas$grupos_kmeans)
+
+# Cerramos la conexión con el archivo PDF para terminar de guardar los gráficos
+dev.off()
+```
